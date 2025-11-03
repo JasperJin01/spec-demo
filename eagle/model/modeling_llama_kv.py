@@ -1135,6 +1135,7 @@ class LlamaModel(LlamaPreTrainedModel):
         next_decoder_cache = () if use_cache else None
 
         for idx, decoder_layer in enumerate(self.layers):
+            # 收集第二层、中间层、倒数第3层特征信息（低中高）
             if idx==len(self.layers)-3 or idx==len(self.layers)//2 or idx==2:
                 all_hidden_states += (hidden_states,)
 

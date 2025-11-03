@@ -496,6 +496,7 @@ class Model(nn.Module):
         self.draft_vocab_size = config.draft_vocab_size
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.length = 7
+        # NOTE 
         self.target_model = LlamaForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
         self.target_model.eval()
         self.fc=nn.Linear(self.hidden_size*3, self.hidden_size, bias=False)
@@ -786,7 +787,7 @@ class Model(nn.Module):
         vlosses = []
         acces = []
         cache_hidden = [[], []]
-
+        # 模拟一个多步的草稿生成和验证过程
         for idx in range(self.length):
             last = idx == self.length - 1
             inputs_embeds = self.embed_tokens(input_ids)

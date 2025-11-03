@@ -427,12 +427,12 @@ class LlamaDecoderLayeremb(nn.Module):
         hidden_states = self.hidden_norm(hidden_states)
         input_emb = self.input_layernorm(input_emb)
 
-        hidden_states = torch.cat((input_emb, hidden_states), dim=-1)
+        hidden_states = torch.cat((input_emb, hidden_states), dim=-1) # 将input_emb和hidden_states在最后一维上进行拼接
 
 
         # cache_hidden.append(hidden_states)
 
-        # Self Attention
+        # 自注意力和残差连接
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -635,6 +635,7 @@ class Model(nn.Module):
         #        use_cache = False
 
         # hidden_states=self.act(self.fc(torch.cat((inputs_embeds,hidden_states),dim=-1)))
+        # 如果 如果 hidden_states 的最后一维与 token embedding 的维度不同，这一步把拼接后的 g 投到草稿模型的 hidden_size
         inputs_embeds = inputs_embeds.to(hidden_states.dtype)
         if hidden_states.shape[-1]!=inputs_embeds.shape[-1]:
             hidden_states = self.fc(hidden_states)
@@ -644,7 +645,7 @@ class Model(nn.Module):
         next_decoder_cache = () if use_cache else None
 
         past_key_value = past_key_values[0] if past_key_values is not None else None
-        layer_outputs = self.midlayer(
+        layer_outputs = self.midlayer( # LlamaDecoderLayeremb
             input_emb=inputs_embeds,
             hidden_states=hidden_states,
             attention_mask=attention_mask,
