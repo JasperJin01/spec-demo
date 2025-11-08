@@ -1,5 +1,7 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+# Respect external CUDA_VISIBLE_DEVICES from environment (e.g., VSCode launch.json)
+# Do not override here to avoid conflicts with torchrun/multi-GPU debugging
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import time
 
 import gradio as gr

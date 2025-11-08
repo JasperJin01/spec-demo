@@ -1,6 +1,7 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+# Respect external CUDA_VISIBLE_DEVICES from environment (e.g., VSCode launch.json)
+# Do not override here to avoid conflicts with torchrun/multi-GPU debugging
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import argparse
 import sys
 import time
@@ -166,7 +167,7 @@ def main():
         device_map="auto",
         use_eagle3=(not args.no_eagle3),
     )
-    model.eval()
+    model.eval() # 评估模式
     
     # Warmup the model like webui.py does
     warmup(model, args)

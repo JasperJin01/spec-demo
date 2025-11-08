@@ -229,7 +229,7 @@ def initialize_tree0(input_ids, model, past_key_values, logits_processor):
     #     return draft_tokens, retrieve_indices,tree_mask,tree_position_ids, hidden_states, token
     return draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token
 
-def initialize_tree(input_ids, model, past_key_values, logits_processor):
+def initialize_tree(input_ids, model, past_key_values, logits_processor): # NOTE 初始化草稿树 model-eamodel(全流程)
     outputs, orig, hidden_states = model(
         input_ids, past_key_values=past_key_values, output_orig=True
     )
@@ -303,7 +303,7 @@ def generate_candidates(tree_logits, tree_indices, retrieve_indices, sample_toke
     return cart_candidates,  tree_candidates
 
 
-def tree_decoding(
+def tree_decoding( # NOTE
         model,
         tree_candidates,
         past_key_values,

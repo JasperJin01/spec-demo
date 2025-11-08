@@ -480,11 +480,11 @@ class Model(nn.Module):
         super().__init__()
         self.config=config
         self.gradient_checkpointing = True
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        self.padding_idx = config.pad_token_id  # 0
+        self.vocab_size = config.vocab_size  # 128256
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.lm_head=nn.Linear(config.hidden_size,config.draft_vocab_size,bias=False)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx) # config.hidden_size: 4096
+        self.lm_head=nn.Linear(config.hidden_size,config.draft_vocab_size,bias=False) # draft_vocab_size: 32000
         if load_emb and not hasattr(config, "target_hidden_size"):
             from safetensors import safe_open
             import json
@@ -543,8 +543,8 @@ class Model(nn.Module):
         for param in self.embed_tokens.parameters():
             param.requires_grad = False
 
-    def init_tree(self):
-        self.tree_mask_init = torch.eye(self.top_k, device=self.embed_tokens.weight.device)[None, None]
+    def init_tree(self): # 推测树的初始化
+        self.tree_mask_init = torch.eye(self.top_k, device=self.embed_tokens.weight.device)[None, None] 
         self.position_ids = torch.zeros(self.top_k, device=self.embed_tokens.weight.device, dtype=torch.long)
         self.tree_mask_init = self.tree_mask_init.to(self.embed_tokens.weight.device)
 

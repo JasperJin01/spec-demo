@@ -115,7 +115,7 @@ class EaModel(nn.Module):
         config = AutoConfig.from_pretrained(base_model_path)
         Type = config.architectures[0] if hasattr(config, 'architectures') and config.architectures else None
         model_type = getattr(config, 'model_type', None)
-
+        # NOTE 识别模型类型，但我不懂Type是什么语法
         if Type == 'LlamaForCausalLM':
             base_model = KVLlamaForCausalLM.from_pretrained(
                 base_model_path, **kwargs
@@ -223,7 +223,7 @@ class EaModel(nn.Module):
             max_length=2048,
             log=False,
             is_llama3=False,
-    ):
+    ): # NOTE ？ 这个和 ea_generate 有啥区别啊？
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
 
@@ -406,9 +406,9 @@ class EaModel(nn.Module):
             max_length=2048,
             log=False,
             is_llama3=False,
-    ):
+    ): # NOTE 
         if is_llama3:
-            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
+            stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>") # 检查是否为 Llama 3 模型，并添加其专用的停止 token <|eot_id|> ？
 
 
         if temperature > 1e-5:
@@ -422,7 +422,7 @@ class EaModel(nn.Module):
         input_ids = input_ids.clone()
         self.ea_layer.reset_kv()
 
-        # Initialize the past key and value states
+        # Initialize the past key and value states  NOTE  初始化 KVCache
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
             past_key_values_data = self.past_key_values_data
@@ -434,24 +434,24 @@ class EaModel(nn.Module):
                 past_key_values,
                 past_key_values_data,
                 current_length_data,
-            ) = initialize_past_key_values(self.base_model,max_length=max_length)
+            ) = initialize_past_key_values(self.base_model,max_length=max_length) # max_length=2048
             self.past_key_values = past_key_values
             self.past_key_values_data = past_key_values_data
             self.current_length_data = current_length_data
 
         input_len = input_ids.shape[1]
-        reset_tree_mode(self)
+        reset_tree_mode(self)  # NOTE  1. 初始化草稿树
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
             input_ids, self, past_key_values, logits_processor
         )
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
-        for idx in range(max_length):
+        for idx in range(max_length): # NOTE 主生成循环
             # with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
 
             draft_tokens = draft_tokens.to(input_ids.device)
-            # with Timer("tree_decoding"):
+            # with Timer("tree_decoding"): # NOTE 2. tree_decoding
             logits, hidden_state_new, outputs = tree_decoding(
                 self,
                 draft_tokens,
@@ -524,7 +524,7 @@ class EaModel(nn.Module):
         input_ids = input_ids.clone()
         self.ea_layer.reset_kv()
 
-        # Initialize the past key and value states
+        # Initialize the past key and value states NOTE 初始化 KVCache
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
             past_key_values_data = self.past_key_values_data
