@@ -19,6 +19,8 @@ from .kv_cache import initialize_past_key_values
 from .cnets import Model
 from .cnets1 import Model as Model1
 from .configs import EConfig
+from .adapters.deepseek_v2 import DeepseekV2HFAdapter
+from .modeling_deepseek_v2_kv import DeepSeekV2KVAccessor
 
 
 class EaModel(nn.Module):
@@ -35,12 +37,25 @@ class EaModel(nn.Module):
             threshold,
             ea_layer_state_dict,
     ):
-
         super().__init__()
         self.base_model = base_model
         self.config = base_model.config
-        self.hidden_size = base_model.lm_head.weight.shape[-1]
-        self.vocab_size = base_model.lm_head.weight.shape[0]
+        
+        # Check if this is a DeepSeek V2 model and create adapter if needed
+        self.is_deepseek_v2 = hasattr(base_model.config, 'model_type') and base_model.config.model_type == 'deepseek_v2'
+        if self.is_deepseek_v2:
+            self.deepseek_adapter = DeepseekV2HFAdapter(base_model)
+            self.kv_accessor = DeepSeekV2KVAccessor(base_model.config, 
+                                                   device=base_model.device, 
+                                                   dtype=base_model.dtype)
+            self.hidden_size = self.deepseek_adapter.get_hidden_size()
+            self.vocab_size = self.deepseek_adapter.get_vocab_size()
+        else:
+            self.deepseek_adapter = None
+            self.kv_accessor = None
+            self.hidden_size = base_model.lm_head.weight.shape[-1]
+            self.vocab_size = base_model.lm_head.weight.shape[0]
+            
         self.base_model_name_or_path = base_model_name_or_path
         self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path, use_fast=False)
         self.use_eagle3 = use_eagle3
@@ -96,8 +111,10 @@ class EaModel(nn.Module):
             threshold=1.0,
             **kwargs,
     ):
-        # assert Type=="LLaMA" or "Mixtral"
-        Type = AutoConfig.from_pretrained(base_model_path).architectures[0]
+        # assert Type=="LLaMA" or "Mixtral" or "DeepSeek V2"
+        config = AutoConfig.from_pretrained(base_model_path)
+        Type = config.architectures[0] if hasattr(config, 'architectures') and config.architectures else None
+        model_type = getattr(config, 'model_type', None)
 
         if Type == 'LlamaForCausalLM':
             base_model = KVLlamaForCausalLM.from_pretrained(
@@ -105,6 +122,12 @@ class EaModel(nn.Module):
             )
         elif Type == 'Qwen2ForCausalLM':
             base_model = KVQwen2ForCausalLM.from_pretrained(
+                base_model_path, **kwargs
+            )
+        elif model_type == 'deepseek_v2' or Type == 'DeepseekV2ForCausalLM':
+            # For DeepSeek V2, use the standard HuggingFace model
+            from transformers import DeepseekV2ForCausalLM
+            base_model = DeepseekV2ForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
         else:
@@ -172,7 +195,6 @@ class EaModel(nn.Module):
             output_orig=False,
             position_ids=None,
     ):
-
         with torch.inference_mode():
             # Pass input through the base model
             outputs = self.base_model.model(
@@ -201,7 +223,6 @@ class EaModel(nn.Module):
             max_length=2048,
             log=False,
             is_llama3=False,
-
     ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
@@ -385,7 +406,6 @@ class EaModel(nn.Module):
             max_length=2048,
             log=False,
             is_llama3=False,
-
     ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")
@@ -488,7 +508,6 @@ class EaModel(nn.Module):
             max_length=2048,
             log=False,
             is_llama3=False,
-
     ):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>")

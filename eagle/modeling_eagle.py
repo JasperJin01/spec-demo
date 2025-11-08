@@ -1511,15 +1511,30 @@ def update_inference_inputs(
 
     new_kv=()
 
-    for past_key_values_data in past_key_values:
-        layer_kv=()
-        for korv in past_key_values_data:
-            tgt = korv[batch_dim_indices, :, select_indices, :]
-            tgt = tgt.permute(0, 2, 1, 3)
-            dst = korv[:, :, prev_input_len: prev_input_len + tgt.shape[-2], :]
-            dst.copy_(tgt, non_blocking=True)
-            layer_kv+=(korv[:, :, : prev_input_len + tgt.shape[-2], :],)
-        new_kv+=(layer_kv,)
+    # Check if this is a DeepSeek V2 model and use appropriate KV cache handling
+    if hasattr(model, 'deepseek_v2_kv_accessor') and model.deepseek_v2_kv_accessor is not None:
+        # Use DeepSeek V2 KV accessor for cache updates
+        # Generate position_ids for the new tokens
+        position_ids = torch.arange(prev_input_len, prev_input_len + max_acccept_len + 1, 
+                                  dtype=torch.long, device=input_ids.device)
+        position_ids = position_ids.unsqueeze(0).expand(bs, -1)
+        
+        # Update KV cache using DeepSeek V2 accessor
+        new_kv = model.deepseek_v2_kv_accessor.update_kv_cache_with_tree(
+            past_key_values, select_indices, batch_dim_indices, 
+            prev_input_len, max_acccept_len + 1, position_ids
+        )
+    else:
+        # Original KV cache handling for other models
+        for past_key_values_data in past_key_values:
+            layer_kv=()
+            for korv in past_key_values_data:
+                tgt = korv[batch_dim_indices, :, select_indices, :]
+                tgt = tgt.permute(0, 2, 1, 3)
+                dst = korv[:, :, prev_input_len: prev_input_len + tgt.shape[-2], :]
+                dst.copy_(tgt, non_blocking=True)
+                layer_kv+=(korv[:, :, : prev_input_len + tgt.shape[-2], :],)
+            new_kv+=(layer_kv,)
 
     input_ids=torch.cat((input_ids,new_input_ids.to(input_ids.device)),dim=1)
 
@@ -1551,7 +1566,7 @@ def update_inference_inputs(
 
     return input_ids, tree_logits, new_token, None, token,attention_mask,finish_flag,new_outs,new_kv
 
-
+# NOTE 这个类没有被使用到
 class EAGLE:
     def __init__(self, base_model, eagle_path, use_tree_attn=True):
         '''
