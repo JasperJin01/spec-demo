@@ -1284,7 +1284,7 @@ def generate_candidates(tree_logits, tree_indices, retrieve_indices, sample_toke
     sample_token = sample_token.to(tree_indices.device)
 
     # candidates_logit = sample_token[0]
-    candidates_logit = sample_token
+    candidates_logit = sample_token # 形状: [bs, 1]
 
     candidates_tree_logits = tree_logits[0]
 

@@ -229,19 +229,26 @@ def initialize_tree0(input_ids, model, past_key_values, logits_processor):
     #     return draft_tokens, retrieve_indices,tree_mask,tree_position_ids, hidden_states, token
     return draft_tokens, retrieve_indices,tree_mask,tree_position_ids, logits, hidden_state, sample_token
 
-def initialize_tree(input_ids, model, past_key_values, logits_processor): # NOTE 初始化草稿树 model-eamodel(全流程)
+# NOTE 初始化草稿树
+# 1.生成第一个 Token  2.构建预测树
+# NOTE ?原始的input_ids?
+def initialize_tree(input_ids, model, past_key_values, logits_processor): 
+    # 主模型推理与 Logits 获取
     outputs, orig, hidden_states = model(
         input_ids, past_key_values=past_key_values, output_orig=True
     )
 
-    if logits_processor is not None:
+    # 第一个 Token 的生成 (采样或贪婪)
+    if logits_processor is not None:  # 应用所有配置的采样策略
         logits = orig[:, -1]
         logits = logits_processor(None, logits)
         probabilities = torch.nn.functional.softmax(logits, dim=1)
         token = torch.multinomial(probabilities, 1)
-    else:
+    else: # 贪婪解码（选择概率最高的那个 Token）
         token = torch.argmax(orig[:, -1])
         token = token[None, None]
+    
+    # 将新生成的 第一个 Token (token) 拼接到原始的 input_ids 序列末尾
     input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
 
     # Clone the output hidden states
@@ -250,6 +257,8 @@ def initialize_tree(input_ids, model, past_key_values, logits_processor): # NOTE
         if outputs["hidden_states"][0].device != ea_device:
             outputs["hidden_states"] = [x.to(ea_device) for x in outputs["hidden_states"]]
         hidden_states=torch.cat(outputs["hidden_states"],dim=-1)
+    
+    # NOTE 构建预测树
     draft_tokens, retrieve_indices,tree_mask,tree_position_ids = model.ea_layer.topK_genrate(hidden_states, input_ids, model.base_model.lm_head,logits_processor)
     return draft_tokens, retrieve_indices,tree_mask,tree_position_ids, orig, hidden_states, token
 
@@ -302,8 +311,8 @@ def generate_candidates(tree_logits, tree_indices, retrieve_indices, sample_toke
     tree_candidates = tree_candidates.unsqueeze(0)
     return cart_candidates,  tree_candidates
 
-
-def tree_decoding( # NOTE
+# NOTE 并行验证
+def tree_decoding( 
         model,
         tree_candidates,
         past_key_values,

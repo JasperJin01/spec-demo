@@ -410,7 +410,8 @@ class EaModel(nn.Module):
         if is_llama3:
             stop_token_id = self.tokenizer.convert_tokens_to_ids("<|eot_id|>") # 检查是否为 Llama 3 模型，并添加其专用的停止 token <|eot_id|> ？
 
-
+        # 根据 temperature、top_p、top_k 是否有效构造一个 logits_processor
+        # 这个对象就是把“采样/截断策略”封装成一个可对 logits 进行变换的管道
         if temperature > 1e-5:
             logits_processor = prepare_logits_processor(temperature=temperature, top_p=top_p, top_k=top_k)
         else:
@@ -440,18 +441,21 @@ class EaModel(nn.Module):
             self.current_length_data = current_length_data
 
         input_len = input_ids.shape[1]
-        reset_tree_mode(self)  # NOTE  1. 初始化草稿树
+        reset_tree_mode(self)  
+        # NOTE  1. 初始化草稿树
         draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token = initialize_tree(
             input_ids, self, past_key_values, logits_processor
         )
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
-        for idx in range(max_length): # NOTE 主生成循环
+        # NOTE 主生成循环
+        for idx in range(max_length): 
             # with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
 
             draft_tokens = draft_tokens.to(input_ids.device)
-            # with Timer("tree_decoding"): # NOTE 2. tree_decoding
+            # with Timer("tree_decoding"): 
+            # NOTE 2. tree_decoding(utils)
             logits, hidden_state_new, outputs = tree_decoding(
                 self,
                 draft_tokens,

@@ -476,6 +476,7 @@ def len_list(x, n):
 
 
 class Model(nn.Module):
+    # total_tokens是干啥的啊？
     def __init__(self, config, load_emb=False, path=None, bias=True, total_tokens=63, depth=5, top_k=8, threshold=1.0):
         super().__init__()
         self.config=config
@@ -552,7 +553,7 @@ class Model(nn.Module):
         self.tree_mask = None
 
     def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        # create causal mask
+        # create causal mask 创建因果掩码/自回归掩码
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
         if input_shape[-1] > 1:
@@ -635,7 +636,8 @@ class Model(nn.Module):
         #        use_cache = False
 
         # hidden_states=self.act(self.fc(torch.cat((inputs_embeds,hidden_states),dim=-1)))
-        # 如果 如果 hidden_states 的最后一维与 token embedding 的维度不同，这一步把拼接后的 g 投到草稿模型的 hidden_size
+        # 如果 如果 hidden_states 的最后一维与 token embedding 的维度不同，
+        # 这一步把拼接后的 g 投到草稿模型的 hidden_size
         inputs_embeds = inputs_embeds.to(hidden_states.dtype)
         if hidden_states.shape[-1]!=inputs_embeds.shape[-1]:
             hidden_states = self.fc(hidden_states)
@@ -675,7 +677,7 @@ class Model(nn.Module):
         depth = self.depth
         top_k = self.top_k
 
-        sample_token = input_ids[:, -1]
+        sample_token = input_ids[:, -1] # 切片 获取每一行中的最后一个元素
 
         scores_list = []
         parents_list = []
@@ -688,6 +690,7 @@ class Model(nn.Module):
         self.reset()
 
         # with Timer("draft many"):
+        # NOTE 草稿模型的前向传播
         if hasattr(self, "stable_kv") and self.stable_kv is not None:
             kv_len = self.stable_kv[0][0].shape[2]
             out_hidden, past_key_values = self(hidden_states, input_ids=input_ids[:, kv_len:],
@@ -697,11 +700,12 @@ class Model(nn.Module):
         self.stable_kv = past_key_values
         last_hidden = out_hidden[:, -1]
 
+        # 第一层 Logits 处理:
         # last_headout = head(last_hidden)
         last_headout = self.lm_head(self.norm(last_hidden))
 
         last_p = self.logsoftmax(last_headout)
-        top = torch.topk(last_p, top_k, dim=-1)
+        top = torch.topk(last_p, top_k, dim=-1) # 选出概率最高的 top_k 个 Token
         topk_index, topk_p = top.indices, top.values
         scores = topk_p[0]
         scores_list.append(scores[None])
@@ -716,11 +720,13 @@ class Model(nn.Module):
         tree_mask = self.tree_mask_init
         topk_cs_index = torch.arange(top_k, device=self.embed_tokens.weight.device)
 
-        # 4
+        # NOTE 递归构建树（核心循环）
         for i in range(depth):
             self.tree_mask = tree_mask
             position_ids = len_posi + self.position_ids
             # with Timer("draft one"):
+            # NOTE input_hidden 和 input_ids 现在是 top_k 乘 N 个 Token 的集合，
+            # 模型并行地计算所有分支的下一个 Token
             out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
                                                position_ids=position_ids, use_cache=True)
             len_posi += 1
