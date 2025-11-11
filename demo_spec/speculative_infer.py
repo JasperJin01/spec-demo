@@ -49,7 +49,7 @@ if __name__ == "__main__":
                 break
             messages.append({"role": "user", "content": user_text})
 
-            reply = generate_speculative_stream(
+            reply_text, metrics = generate_speculative_stream(
                 base_model=base_model,
                 base_tokenizer=base_tokenizer,
                 draft_model=draft_model,
@@ -63,7 +63,14 @@ if __name__ == "__main__":
             )
             # 流式输出已在函数内部完成，这里补一个换行并记录到历史
             print()
-            messages.append({"role": "assistant", "content": reply})
+            messages.append({"role": "assistant", "content": reply_text})
+
+            # 输出本轮评价指标（参考 EAGLE3 的 Compression Ratio 定义）
+            ratio = metrics.get("compression_ratio", 0.0)
+            tokens = int(metrics.get("tokens_generated", 0.0))
+            base_fw = int(metrics.get("base_forward_calls", 0.0))
+            avg_acc = metrics.get("avg_accept_len", 0.0)
+            print(f"[指标] ratio={ratio:.2f}  tokens={tokens}  base_fw_calls={base_fw}  avg_accept_len={avg_acc:.2f}")
     except KeyboardInterrupt:
         print("\n[INFO] 已中断，对话结束。")
   

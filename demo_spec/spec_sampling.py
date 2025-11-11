@@ -105,18 +105,21 @@ def verify_with_base_kv(
     device: torch.device,
     logits_warper: Optional[LogitsProcessorList] = None,
     candidate_probs: Optional[torch.Tensor] = None,
-) -> Tuple[int, Optional[int], Tuple, torch.Tensor]:
+) -> Tuple[int, Optional[int], Tuple, torch.Tensor, int]:
     # EAGLE3 风格的随机接受：按 px/qx 的比值做随机接受测试；拒绝时从 base 分布采样 mismatch_token
     accept_len = 0
     mismatch_token: Optional[int] = None
+    # 记录本次校验消耗的 base 前向次数（用于压缩比指标）
+    base_fw_calls_used = 0
 
     if candidate_tokens.numel() == 0:
-        return 0, None, base_past, base_last_logits
+        return 0, None, base_past, base_last_logits, base_fw_calls_used
 
     L = candidate_tokens.shape[0]
 
     # 先一次性前向整段候选，取每个位置的 base logits
     chunk_logits, _ = _forward_chunk_with_cache(base_model, candidate_tokens, base_past, device)
+    base_fw_calls_used += 1
 
     # 遍历每个位置 i=1..L，计算 base 概率 px 与 draft 提案概率 qx，进行随机接受
     for i in range(1, L + 1):
@@ -147,12 +150,13 @@ def verify_with_base_kv(
     if accept_len > 0:
         accepted_seq = candidate_tokens[:accept_len]
         update_logits, update_past = _forward_chunk_with_cache(base_model, accepted_seq, base_past, device)
+        base_fw_calls_used += 1
         new_last_logits = update_logits[:, -1, :]
     else:
         update_past = base_past
         new_last_logits = base_last_logits
 
-    return accept_len, mismatch_token, update_past, new_last_logits
+    return accept_len, mismatch_token, update_past, new_last_logits, base_fw_calls_used
 
 
 def _render_messages_with_template(tokenizer: AutoTokenizer, messages: List[Dict[str, str]]) -> str:
@@ -196,7 +200,7 @@ def generate_speculative_stream(
     top_p: Optional[float] = None,
     stream_handler: Optional[Callable[[str], None]] = None,
     is_llama3: bool = False,
-) -> str:
+) -> Tuple[str, Dict[str, float]]:
     device = next(base_model.parameters()).device
     # 根据提供的 messages 使用各自 tokenizer 的聊天模板渲染；否则使用原始 prompt
     if messages is not None:
@@ -246,6 +250,23 @@ def generate_speculative_stream(
 
     generated_text: List[str] = []
 
+    # 评估指标计数器（仅统计新增生成阶段，不计入上下文初始化）
+    base_forward_calls = 0
+    tokens_generated = 0
+    accept_events = 0
+    sum_accept_len = 0
+
+    def build_metrics() -> Dict[str, float]:
+        compression_ratio = (float(tokens_generated) / float(base_forward_calls)) if base_forward_calls > 0 else 0.0
+        avg_accept = (float(sum_accept_len) / float(accept_events)) if accept_events > 0 else 0.0
+        return {
+            "compression_ratio": compression_ratio,
+            "tokens_generated": float(tokens_generated),
+            "base_forward_calls": float(base_forward_calls),
+            "accept_events": float(accept_events),
+            "avg_accept_len": avg_accept,
+        }
+
     # 统一的流式输出接口
     def emit(text_chunk: str):
         if not text_chunk:
@@ -272,10 +293,11 @@ def generate_speculative_stream(
         best_q = candidates[0]["proposal_probs"]
 
         # 用 base 并行校验（随机接受），并返回“已接受长度”的新 KV 与 logits
-        accept_len, mismatch_token, new_base_past, new_base_logits = verify_with_base_kv(
+        accept_len, mismatch_token, new_base_past, new_base_logits, base_fw_used = verify_with_base_kv(
             base_model, base_past, base_last_logits, best, device,
             logits_warper=base_warper, candidate_probs=best_q
         )
+        base_forward_calls += base_fw_used
 
         # 接受的 token：流式输出；KVCache 批量一次性推进
         if accept_len > 0:
@@ -291,6 +313,11 @@ def generate_speculative_stream(
             decoded = base_tokenizer.decode(accepted_ids, skip_special_tokens=True)
             emit(decoded)
 
+            # 指标统计
+            tokens_generated += len(accepted_ids)
+            accept_events += 1
+            sum_accept_len += len(accepted_ids)
+
             # 批量推进 draft 的缓存到接受后的状态
             accepted_tensor = best[:accept_len]
             draft_logits_chunk, draft_past = _forward_chunk_with_cache(draft_model, accepted_tensor, draft_past, device)
@@ -304,16 +331,20 @@ def generate_speculative_stream(
 
             # 若最后一个为 stop token，则结束
             if accepted_ids and accepted_ids[-1] in stop_token_ids:
-                return "".join(generated_text)
+                return "".join(generated_text), build_metrics()
 
         # 处理不匹配：插入 base 的预测 token（按分布随机采样）
         if mismatch_token is not None:
             decoded_mis = base_tokenizer.decode([mismatch_token], skip_special_tokens=True)
             emit(decoded_mis)
 
+            # 指标统计
+            tokens_generated += 1
+
             # 推进两个模型的 KVCache
             draft_last_logits, draft_past = _forward_next_with_cache(draft_model, mismatch_token, draft_past, device)
             base_last_logits, base_past = _forward_next_with_cache(base_model, mismatch_token, base_past, device)
+            base_forward_calls += 1
 
             # 更新 warper 的 current_input_ids 视图
             token_tensor = torch.tensor([[mismatch_token]], device=device)
@@ -322,7 +353,7 @@ def generate_speculative_stream(
 
             # stop 则结束
             if mismatch_token in stop_token_ids:
-                return "".join(generated_text)
+                return "".join(generated_text), build_metrics()
 
         # 若既没有接受也没有不匹配（极端情况），则从 base 分布采 1 个 token 以推进
         if accept_len == 0 and mismatch_token is None:
@@ -333,15 +364,15 @@ def generate_speculative_stream(
             decoded_token = base_tokenizer.decode([next_token], skip_special_tokens=True)
             emit(decoded_token)
 
+            # 指标统计
+            tokens_generated += 1
+
             draft_last_logits, draft_past = _forward_next_with_cache(draft_model, next_token, draft_past, device)
             base_last_logits, base_past = _forward_next_with_cache(base_model, next_token, base_past, device)
+            base_forward_calls += 1
 
             tok_tensor = torch.tensor([[next_token]], device=device)
             base_curr_ids = torch.cat([base_curr_ids, tok_tensor], dim=1)
             draft_curr_ids = torch.cat([draft_curr_ids, tok_tensor], dim=1)
 
-            if next_token in stop_token_ids:
-                return "".join(generated_text)
-
-    # 循环结束，返回累计文本
-    return "".join(generated_text)
+    return "".join(generated_text), build_metrics()
