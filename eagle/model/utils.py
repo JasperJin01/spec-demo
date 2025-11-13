@@ -232,18 +232,18 @@ def initialize_tree0(input_ids, model, past_key_values, logits_processor):
 # NOTE 初始化草稿树
 # 1.生成第一个 Token  2.构建预测树
 # NOTE ?原始的input_ids?
-def initialize_tree(input_ids, model, past_key_values, logits_processor): 
+def initialize_tree(input_ids, model, past_key_values, logits_processor): # model: EaModel
     # 主模型推理与 Logits 获取
     outputs, orig, hidden_states = model(
         input_ids, past_key_values=past_key_values, output_orig=True
-    )
+    ) # NOTE outputs["hidden_states"] 代码更改了模型的hidden_states输出，tuple，len=3，分别是高中低3层的hidden_states
 
     # 第一个 Token 的生成 (采样或贪婪)
     if logits_processor is not None:  # 应用所有配置的采样策略
         logits = orig[:, -1]
         logits = logits_processor(None, logits)
         probabilities = torch.nn.functional.softmax(logits, dim=1)
-        token = torch.multinomial(probabilities, 1)
+        token = torch.multinomial(probabilities, 1) # 采样 1个
     else: # 贪婪解码（选择概率最高的那个 Token）
         token = torch.argmax(orig[:, -1])
         token = token[None, None]
@@ -256,7 +256,7 @@ def initialize_tree(input_ids, model, past_key_values, logits_processor):
         ea_device = model.ea_layer.lm_head.weight.device
         if outputs["hidden_states"][0].device != ea_device:
             outputs["hidden_states"] = [x.to(ea_device) for x in outputs["hidden_states"]]
-        hidden_states=torch.cat(outputs["hidden_states"],dim=-1)
+        hidden_states=torch.cat(outputs["hidden_states"],dim=-1) # [B,S,3V]
     
     # NOTE 构建预测树
     draft_tokens, retrieve_indices,tree_mask,tree_position_ids = model.ea_layer.topK_genrate(hidden_states, input_ids, model.base_model.lm_head,logits_processor)
@@ -264,7 +264,7 @@ def initialize_tree(input_ids, model, past_key_values, logits_processor):
 
 
 def reset_tree_mode(
-        model,
+        model, # EaModel
 ):
     model.base_model.model.tree_mask = None
     model.base_model.model.tree_mode = None
@@ -353,7 +353,7 @@ def evaluate_posterior(
 
     Depending on the temperature value, the function either uses greedy decoding or evaluates posterior
     probabilities to select the best candidate.
-
+    NOTE 这里的batch_size, sequence_length指的是来评估的样本，实际上就是草稿的输出。batch_size为草稿树的序列数量，sequence_length为每个序列的长度？
     Args:
     - logits (torch.Tensor): Predicted logits of shape (batch_size, sequence_length, vocab_size).
     - candidates (torch.Tensor): Candidate token sequences.
@@ -424,6 +424,7 @@ def evaluate_posterior(
         return torch.tensor(best_candidate), accept_length - 1, sample_p
 
 
+# NOTE 遍历拷贝 Question
 @torch.no_grad()
 def update_inference_inputs(
         input_ids,

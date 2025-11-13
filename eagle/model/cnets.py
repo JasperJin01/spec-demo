@@ -475,7 +475,7 @@ def len_list(x, n):
     return [i for i in x if len(i) <= n]
 
 
-class Model(nn.Module):
+class Model(nn.Module): # 草稿模型
     # total_tokens是干啥的啊？
     def __init__(self, config, load_emb=False, path=None, bias=True, total_tokens=63, depth=5, top_k=8, threshold=1.0):
         super().__init__()
@@ -553,7 +553,7 @@ class Model(nn.Module):
         self.tree_mask = None
 
     def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        # create causal mask 创建因果掩码/自回归掩码
+        # NOTE create causal mask 创建因果掩码/自回归掩码
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
         if input_shape[-1] > 1:
@@ -587,7 +587,7 @@ class Model(nn.Module):
     def forward(
             self,
             hidden_states,
-            input_ids,
+            input_ids, # [batch_size, seq_length] 或者 [batch_size, top_k]
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -603,14 +603,14 @@ class Model(nn.Module):
         past_key_values_length = 0
 
         with torch.no_grad():
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids) # [batch_size, seq_length, hidden_size]
             # inputs_embeds = inputs_embeds.detach()
 
         # if std is not None:
         #     noise = torch.randn(inputs_embeds.size(),device=inputs_embeds.device) * std
         #     inputs_embeds=inputs_embeds+noise
 
-        if past_key_values is not None:
+        if past_key_values is not None: # NOTE 这是什么情况
             past_key_values_length = past_key_values[0][0].shape[2]
             seq_length_with_past = seq_length_with_past + past_key_values_length
         if position_ids is None:
@@ -626,10 +626,10 @@ class Model(nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=hidden_states.device
-            )
+            ) # [batch_size, seq_length_with_past]
         attention_mask = self._prepare_decoder_attention_mask(
             attention_mask, (batch_size, seq_length), hidden_states, past_key_values_length
-        )
+        ) # 下三角矩阵，分别是0和-inf
 
         # if self.gradient_checkpointing and self.training:
         #    if use_cache:
@@ -698,7 +698,7 @@ class Model(nn.Module):
         else:
             out_hidden, past_key_values = self(hidden_states, input_ids=input_ids, use_cache=True)
         self.stable_kv = past_key_values
-        last_hidden = out_hidden[:, -1]
+        last_hidden = out_hidden[:, -1] # 最后一个token的logit
 
         # 第一层 Logits 处理:
         # last_headout = head(last_hidden)
@@ -716,7 +716,7 @@ class Model(nn.Module):
         else:
             ss_token.append(topk_index+self.d2t[topk_index])
             input_ids = topk_index+self.d2t[topk_index]
-        input_hidden = last_hidden[None].repeat(1, top_k, 1)
+        input_hidden = last_hidden[None].repeat(1, top_k, 1) # repeat 整体重复
         tree_mask = self.tree_mask_init
         topk_cs_index = torch.arange(top_k, device=self.embed_tokens.weight.device)
 
@@ -730,30 +730,30 @@ class Model(nn.Module):
             out_hidden, past_key_values = self(input_hidden, input_ids=input_ids, past_key_values=past_key_values,
                                                position_ids=position_ids, use_cache=True)
             len_posi += 1
-
+            # NOTE 这里print shape
             # with Timer("sort1"):
-            bias1 = top_k if i > 0 else 0
-            bias2 = max(0, i - 1)
+            bias1 = top_k if i > 0 else 0 # 横向展开
+            bias2 = max(0, i - 1) # 深度
             bias = 1 + top_k ** 2 * bias2 + bias1
             parents = (topk_cs_index + bias)
             parents_list.append(parents)
 
             last_headout = self.lm_head(self.norm(out_hidden[0]))
-            last_p = self.logsoftmax(last_headout)
+            last_p = self.logsoftmax(last_headout) # NOTE 添加print [topk, vocab_size]
 
-            top = torch.topk(last_p, top_k, dim=-1)
-            topk_index, topk_p = top.indices, top.values
+            top = torch.topk(last_p, top_k, dim=-1) # 在最后维度，取 top_k 个概率最大的 token
+            topk_index, topk_p = top.indices, top.values # 下标和分数
 
-            cu_scores = topk_p + scores[:, None]
-
-            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+            cu_scores = topk_p + scores[:, None] # 本层分值 累计 上层分值 scores，累积路径的 log 概率和
+            # 广播机制，[10][10]和[10][1]相加，上层分值广播的
+            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1) # 展开cu_scores并保留topk score
             topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
-            scores = topk_cs_p
+            scores = topk_cs_p # 作为下一轮继续展开时的“父路径累积分值”
 
-            out_ids = topk_cs_index // top_k
-            input_hidden = out_hidden[:, out_ids]
+            out_ids = topk_cs_index // top_k # row(父路径的索引)
+            input_hidden = out_hidden[:, out_ids] # 从 out_hidden（保存当前父路径的隐状态集合）里，按 out_ids 选出这次全局筛选胜出的父路径对应的隐状态（作为下一步继续前向的输入隐状态。这样只沿着最优的 top_k 条路径继续展开）
 
-            input_ids = topk_index.view(-1)[topk_cs_index][None]
+            input_ids = topk_index.view(-1)[topk_cs_index][None] # view展开 后，按 topk_cs_index 选择，再增加一个 Batch 维度
 
             if self.config.vocab_size == self.config.draft_vocab_size:
                 ss_token.append(topk_index)
@@ -761,15 +761,15 @@ class Model(nn.Module):
                 input_ids = input_ids + self.d2t[input_ids]
                 ss_token.append(topk_index+self.d2t[topk_index])
             scores_list.append(cu_scores)
-            tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
+            tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3) # NOTE tree_mask四维
 
 
         scores_list = torch.cat(scores_list, dim=0).view(-1)
         ss_token_list = torch.cat(ss_token, dim=0).view(-1)
-        top_scores = torch.topk(scores_list, total_tokens, dim=-1)
+        top_scores = torch.topk(scores_list, total_tokens, dim=-1) 
         top_scores_index = top_scores.indices
         top_scores_index = torch.sort(top_scores_index).values
-
+        # 确定草稿序列和父节点关系
         draft_tokens = ss_token_list[top_scores_index]
         draft_tokens = torch.cat((sample_token, draft_tokens), dim=0)
 

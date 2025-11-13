@@ -98,7 +98,7 @@ def stream_generate(model, tokenizer, input_ids, use_eagle=True, temperature=0.0
         top_p=top_p,
         max_new_tokens=max_new_tokens,
         is_llama3=is_llama3,
-    )
+    ) # NOTE gen 是Generator 对象？
 
     input_len = input_ids.shape[1]
     prev_len = input_len

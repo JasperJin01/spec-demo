@@ -1,6 +1,6 @@
 import torch
 
-
+# Quesion: 这个KVCache类是不是只对草稿模型的KVCache啊？对大模型没什么用吧？
 class KVCache:
     """
     A key-value cache for the model.

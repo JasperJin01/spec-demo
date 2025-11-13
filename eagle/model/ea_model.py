@@ -194,7 +194,7 @@ class EaModel(nn.Module):
             past_key_values=None,
             output_orig=False,
             position_ids=None,
-    ):
+    ): # 执行base_model的一次前向传播
         with torch.inference_mode():
             # Pass input through the base model
             outputs = self.base_model.model(
@@ -423,7 +423,7 @@ class EaModel(nn.Module):
         input_ids = input_ids.clone()
         self.ea_layer.reset_kv()
 
-        # Initialize the past key and value states  NOTE  初始化 KVCache
+        # NOTE  初始化 KVCache 大模型的
         if hasattr(self, "past_key_values"):
             past_key_values = self.past_key_values
             past_key_values_data = self.past_key_values_data
@@ -432,9 +432,9 @@ class EaModel(nn.Module):
             current_length_data.zero_()
         else:
             (
-                past_key_values,
-                past_key_values_data,
-                current_length_data,
+                past_key_values, # 每一层两个 KVCache 对象组成的列表（[K, V]），一共 num_hidden_layers 组
+                past_key_values_data, # 一个“列表”，每个元素是一个五维张量，分别对应一段在同一设备上的连续层的 K/V 数据缓冲区  [2 * group_layers, batch_size(=1), num_kv_heads, max_length, head_dim
+                current_length_data, # CPU 上的长整型向量，长度为 2 * num_hidden_layers（每层 K/V 各一个长度指针）  在每次接受分支后，更新为“主序列新长度”，基础模型后续前向直接基于最新长度进行增量计算
             ) = initialize_past_key_values(self.base_model,max_length=max_length) # max_length=2048
             self.past_key_values = past_key_values
             self.past_key_values_data = past_key_values_data
