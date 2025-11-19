@@ -523,10 +523,8 @@ class Model(nn.Module): # 草稿模型
         self.total_tokens = total_tokens - 1
         self.depth = depth
         self.threshold = math.log(threshold)
-        # print("total_tokens",total_tokens)
-        # print("depth",depth)
-        # print("top_k",top_k)
-        # print("threshold",threshold)
+        # 外部草稿模型适配器（默认未启用）
+        self.external_adapter = None
         self.hidden_size = config.hidden_size
         self.midlayer = LlamaDecoderLayeremb(config)
         if hasattr(config, "target_hidden_size"):
@@ -668,11 +666,36 @@ class Model(nn.Module): # 草稿模型
 
     def reset_kv(self):
         self.stable_kv = None
+        # 同步重置外部草稿模型的稳定缓存
+        if hasattr(self, "external_adapter") and self.external_adapter is not None:
+            if hasattr(self.external_adapter, "reset_kv"):
+                self.external_adapter.reset_kv()
+            elif isinstance(self.external_adapter, dict):
+                self.external_adapter["stable_kv"] = None
+
+    @torch.no_grad()
+    def _propose_tree_external(self, input_ids, logits_processor):
+        # 通过外部适配器构建草稿树
+        if not hasattr(self, "external_adapter") or self.external_adapter is None:
+            raise RuntimeError("external_adapter not initialized")
+        if not hasattr(self, "tree_mask_init") or self.tree_mask_init is None:
+            self.init_tree()
+        return self.external_adapter.propose_tree(
+            input_ids=input_ids,
+            total_tokens=self.total_tokens,
+            depth=self.depth,
+            top_k=self.top_k,
+            tree_mask_init=self.tree_mask_init,
+            position_ids=self.position_ids,
+            logits_processor=logits_processor,
+        )
 
     @torch.no_grad()
     def topK_genrate(self, hidden_states, input_ids, head, logits_processor):
-
-        input_ids = input_ids.to(hidden_states.device)
+        # 外部草稿模型模式：忽略 hidden_states/head，直接使用外部小模型递归展开
+        if hasattr(self, "external_adapter") and self.external_adapter is not None:
+            return self._propose_tree_external(input_ids, logits_processor)
+        input_ids = input_ids.to(self.embed_tokens.weight.device)
         total_tokens = self.total_tokens
         depth = self.depth
         top_k = self.top_k
@@ -775,7 +798,6 @@ class Model(nn.Module): # 草稿模型
 
         draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
         mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)
-        # mask_index[(top_scores_index[mask_index]!=draft_parents - 1)]=-1
         mask_index[draft_parents == 0] = -1
         mask_index = mask_index + 1
         mask_index_list = mask_index.tolist()
@@ -814,12 +836,9 @@ class Model(nn.Module): # 草稿模型
                     retrieve_indices[rid][j] = cid
                     cid = mask_index_list[cid - 1]
                 rid += 1
-
         if logits_processor is not None:
             maxitem = total_tokens + 5
-
             def custom_sort(lst):
-                # sort_keys=[len(list)]
                 sort_keys = []
                 for i in range(len(lst)):
                     sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)

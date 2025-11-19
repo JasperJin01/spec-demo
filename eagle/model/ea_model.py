@@ -8,6 +8,157 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 import os
 from transformers import PreTrainedModel, PretrainedConfig, AutoConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer as _AutoTokenizerForDraft
+
+class ExternalDraftAdapter:
+    """
+    外部草稿模型封装：管理小模型、稳定 KV 缓存，以及递归树展开。
+    不依赖主模型隐藏层，直接用小模型 logits 构建草稿树。
+    """
+    def __init__(self, small_model, tokenizer, device, dtype):
+        self.model = small_model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.dtype = dtype
+        self.stable_kv = None
+        self.model.to(self.device)
+        self.model.eval()
+
+    def reset_kv(self):
+        self.stable_kv = None
+
+    @torch.no_grad()
+    def _advance_prefix(self, context_ids):
+        # 将前缀输入写入 stable_kv
+        if self.stable_kv is not None:
+            kv_len = self.stable_kv[0][0].shape[2]
+            new_prefix = context_ids[:, kv_len:]
+            if new_prefix.shape[1] > 0:
+                out_ctx = self.model(input_ids=new_prefix, use_cache=True, past_key_values=self.stable_kv)
+                self.stable_kv = out_ctx.past_key_values
+        else:
+            if context_ids.shape[1] > 0:
+                out_ctx = self.model(input_ids=context_ids, use_cache=True)
+                self.stable_kv = out_ctx.past_key_values
+
+    @torch.no_grad()
+    def propose_tree(self, input_ids, total_tokens, depth, top_k, tree_mask_init, position_ids, logits_processor):
+        # 输入 input_ids 形如 [1, L]，最后一个 token 为 initialize_tree 采样的 sample_token
+        sample_token = input_ids[:, -1:].to(self.device)  # [1,1]
+        context_ids = input_ids[:, 1:].to(self.device)    # 去掉首 token，与原实现一致
+
+        scores_list = []
+        parents_list = []
+        ss_token = []
+
+        len_posi = context_ids.shape[1]
+
+        # 简易修复：不使用 past_key_values，直接以“完整前缀 + 当前分支序列”进行前向
+        step_inputs = torch.cat([context_ids, sample_token], dim=1)
+        out_step = self.model(input_ids=step_inputs, use_cache=False)
+
+        # 第一层 top-k
+        last_logits = out_step.logits[:, -1, :]
+        last_p = torch.log_softmax(last_logits, dim=-1)
+        top = torch.topk(last_p, top_k, dim=-1)
+        topk_index, topk_p = top.indices, top.values
+        scores = topk_p[0]
+        scores_list.append(scores[None])
+        parents_list.append(torch.zeros(1, dtype=torch.long, device=self.device))
+
+        ss_token.append(topk_index)
+        branch_prefix = topk_index.view(-1, 1)  # [top_k,1]
+        tree_mask = tree_mask_init
+
+        for i in range(depth):
+            # 与原实现保持一致的 position_ids 用于内部树掩码（小模型不使用）
+            _ = len_posi + position_ids
+            # 为每个分支构造批量输入：上下文 + sample_token + 分支历史
+            batch_prefix = torch.cat([
+                context_ids.repeat(top_k, 1),
+                sample_token.repeat(top_k, 1),
+                branch_prefix
+            ], dim=1)
+            out_br = self.model(input_ids=batch_prefix, use_cache=False)
+            len_posi += 1
+
+            last_p = torch.log_softmax(out_br.logits[:, -1, :], dim=-1)  # [top_k, vocab]
+            top = torch.topk(last_p, top_k, dim=-1)
+            next_indices, next_scores = top.indices, top.values
+
+            cu_scores = next_scores + scores[:, None]
+            topk_cs = torch.topk(cu_scores.view(-1), top_k, dim=-1)
+            topk_cs_index, topk_cs_p = topk_cs.indices, topk_cs.values
+            scores = topk_cs_p
+
+            out_ids = topk_cs_index // top_k
+            next_tokens = next_indices.view(-1)[topk_cs_index]
+
+            # 更新分支历史序列
+            branch_prefix = torch.cat([
+                branch_prefix.index_select(0, out_ids),
+                next_tokens.view(-1, 1)
+            ], dim=1)
+
+            parents = (topk_cs_index + (1 + (top_k ** 2) * max(0, i - 1) + (top_k if i > 0 else 0)))
+            parents_list.append(parents)
+            ss_token.append(next_indices)
+            scores_list.append(cu_scores)
+            tree_mask = torch.cat((tree_mask[:, :, out_ids], tree_mask_init), dim=3)
+
+        scores_list = torch.cat(scores_list, dim=0).view(-1)
+        ss_token_list = torch.cat(ss_token, dim=0).view(-1)
+        top_scores = torch.topk(scores_list, total_tokens, dim=-1)
+        top_scores_index = torch.sort(top_scores.indices).values
+
+        draft_tokens = ss_token_list[top_scores_index]
+        draft_tokens = torch.cat((sample_token.squeeze(1), draft_tokens), dim=0)
+
+        draft_parents = torch.cat(parents_list, dim=0)[top_scores_index // top_k].long()
+        mask_index = torch.searchsorted(top_scores_index, draft_parents - 1, right=False)
+        mask_index[draft_parents == 0] = -1
+        mask_index = mask_index + 1
+        mask_index_list = mask_index.tolist()
+
+        tree_mask_out = torch.eye(total_tokens + 1).bool()
+        tree_mask_out[:, 0] = True
+        for i in range(total_tokens):
+            tree_mask_out[i + 1].add_(tree_mask_out[mask_index_list[i]])
+        tree_position_ids = torch.sum(tree_mask_out, dim=1) - 1
+
+        tree_mask_out = tree_mask_out.float()[None, None]
+        draft_tokens = draft_tokens[None]
+
+        max_depth = torch.max(tree_position_ids) + 1
+        noleaf_index = torch.unique(mask_index).tolist()
+        noleaf_num = len(noleaf_index) - 1
+        leaf_num = total_tokens - noleaf_num
+        retrieve_indices = torch.zeros(leaf_num, max_depth.item(), dtype=torch.long) - 1
+        retrieve_indices = retrieve_indices.tolist()
+
+        rid = 0
+        position_ids_list = tree_position_ids.tolist()
+        for i in range(total_tokens + 1):
+            if i not in noleaf_index:
+                cid = i
+                depth_i = position_ids_list[i]
+                for j in reversed(range(depth_i + 1)):
+                    retrieve_indices[rid][j] = cid
+                    cid = mask_index_list[cid - 1]
+                rid += 1
+
+        if logits_processor is not None:
+            maxitem = total_tokens + 5
+            def custom_sort(lst):
+                sort_keys = []
+                for i in range(len(lst)):
+                    sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)
+                return sort_keys
+            retrieve_indices = sorted(retrieve_indices, key=custom_sort)
+
+        retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
+        tree_position_ids = tree_position_ids.to(self.device)
+        return draft_tokens, retrieve_indices, tree_mask_out, tree_position_ids
 
 from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
 from .modeling_mixtral_kv import MixtralForCausalLM as KVMixtralForCausalLM
@@ -376,6 +527,7 @@ class EaModel(nn.Module):
                 input_id = torch.multinomial(probabilities, 1)
             else:
                 input_id = outputs.logits[:, -1:].argmax(dim=-1)
+
             outputs = self.base_model(input_id, use_cache=True, past_key_values=past_key_values)
             input_ids = torch.cat([input_ids, input_id], dim=-1)
             new_token += 1
@@ -422,6 +574,13 @@ class EaModel(nn.Module):
         padding = (torch.zeros(1, 1, dtype=torch.long) - 1).to(input_ids.device)
         input_ids = input_ids.clone()
         self.ea_layer.reset_kv()
+        # 外部草稿适配器 KV 重置（若启用）
+        if hasattr(self.ea_layer, "external_adapter") and self.ea_layer.external_adapter is not None:
+            adapter = self.ea_layer.external_adapter
+            if hasattr(adapter, "reset_kv"):
+                adapter.reset_kv()
+            else:
+                adapter["stable_kv"] = None
 
         # NOTE  初始化 KVCache 大模型的
         if hasattr(self, "past_key_values"):
@@ -575,3 +734,15 @@ class EaModel(nn.Module):
                 break
             if input_ids.shape[1] > max_length:
                 break
+
+    def enable_external_draft(self, draft_model_name_or_path: str, torch_dtype: torch.dtype = None):
+        """
+        启用外部草稿模型：加载 HF 小模型与分词器，并将适配器引用注入到 ea_layer。
+        草稿模型仅用于生成树提案与稳定 KV，不依赖主模型隐藏层。
+        """
+        device = self.ea_layer.lm_head.weight.device
+        dtype = torch_dtype if torch_dtype is not None else self.ea_layer.lm_head.weight.dtype
+        small_tokenizer = _AutoTokenizerForDraft.from_pretrained(draft_model_name_or_path, use_fast=True)
+        small_model = AutoModelForCausalLM.from_pretrained(draft_model_name_or_path, torch_dtype=dtype)
+        adapter = ExternalDraftAdapter(small_model, small_tokenizer, device, dtype)
+        self.ea_layer.external_adapter = adapter

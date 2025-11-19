@@ -153,6 +153,7 @@ def main():
     parser.add_argument("--load-in-4bit", action="store_true", help="使用4bit量化加载基础模型")
     parser.add_argument("--no-eagle3", action="store_true", help="不使用EAGLE-3特性（降级到EAGLE-2实现）")
     parser.add_argument("--naive", action="store_true", help="使用基础模型的朴素自回归解码（不使用EAGLE加速）")
+    parser.add_argument("--external-draft-model", type=str, default=None, help="启用外部小模型作为草稿模型（HF仓库ID或本地路径）；仅在EAGLE-3下生效")
     args = parser.parse_args()
 
     # 构建模型
@@ -168,7 +169,15 @@ def main():
         use_eagle3=(not args.no_eagle3),
     )
     model.eval() # 评估模式
-    
+
+    # 若指定外部小模型，则启用外部草稿模型适配器
+    if (not args.no_eagle3) and args.external_draft_model:
+        try:
+            model.enable_external_draft(args.external_draft_model, torch_dtype=torch.float16)
+            print(f"已启用外部草稿模型: {args.external_draft_model}")
+        except Exception as e:
+            print(f"启用外部草稿模型失败: {e}")
+
     # Warmup the model like webui.py does
     warmup(model, args)
 
@@ -237,3 +246,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+# 用法示例：
+# python -m eagle.application.cli --ea-model-path /path/to/eagle3 --base-model-path /path/to/llama --model-type llama-3-instruct \
+#   --external-draft-model /path/to/small-llama --total-token 60 --max-new-token 512
+# 说明：指定 --external-draft-model 时，将在 EAGLE-3 模式下启用外部小模型作为草稿树提案与 KV 稳定化来源。
